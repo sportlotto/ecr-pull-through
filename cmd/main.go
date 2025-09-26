@@ -8,6 +8,7 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"regexp"
 	"strings"
 	"time"
 
@@ -23,6 +24,19 @@ func handleRoot(w http.ResponseWriter, r *http.Request) {
 }
 
 var config *Config
+
+// sanitizeForLog removes potentially dangerous characters from log messages
+// to prevent log injection attacks
+func sanitizeForLog(input string) string {
+	// Remove control characters and newlines that could be used for log injection
+	re := regexp.MustCompile(`[\x00-\x1F\x7F]`)
+	sanitized := re.ReplaceAllString(input, "")
+	// Limit length to prevent log flooding
+	if len(sanitized) > 100 {
+		sanitized = sanitized[:100] + "..."
+	}
+	return sanitized
+}
 
 func handleMutate(w http.ResponseWriter, r *http.Request) {
 
@@ -100,7 +114,7 @@ func actuallyMutate(body []byte) ([]byte, error) {
 			resourceName = pod.ObjectMeta.GenerateName
 			resourceNamespace = pod.Namespace
 			pathPrefix = "/spec"
-			log.Printf("Received request to mutate pod %s:%s", resourceNamespace, resourceName)
+			log.Printf("Received request to mutate pod %s:%s", sanitizeForLog(resourceNamespace), sanitizeForLog(resourceName))
 
 		case "Job":
 			var job batchv1.Job
@@ -111,7 +125,7 @@ func actuallyMutate(body []byte) ([]byte, error) {
 			resourceName = job.ObjectMeta.Name
 			resourceNamespace = job.Namespace
 			pathPrefix = "/spec/template/spec"
-			log.Printf("Received request to mutate job %s:%s", resourceNamespace, resourceName)
+			log.Printf("Received request to mutate job %s:%s", sanitizeForLog(resourceNamespace), sanitizeForLog(resourceName))
 
 		case "CronJob":
 			var cronJob batchv1.CronJob
@@ -122,7 +136,7 @@ func actuallyMutate(body []byte) ([]byte, error) {
 			resourceName = cronJob.ObjectMeta.Name
 			resourceNamespace = cronJob.Namespace
 			pathPrefix = "/spec/jobTemplate/spec/template/spec"
-			log.Printf("Received request to mutate cronjob %s:%s", resourceNamespace, resourceName)
+			log.Printf("Received request to mutate cronjob %s:%s", sanitizeForLog(resourceNamespace), sanitizeForLog(resourceName))
 
 		default:
 			return nil, fmt.Errorf("unsupported resource kind: %s", ar.Kind.Kind)
@@ -141,7 +155,7 @@ func actuallyMutate(body []byte) ([]byte, error) {
 					}
 					p = append(p, patch)
 					imageReplaced = true
-					log.Printf("Created patch for container image %s on %s %s:%s, with %s", container.Image, ar.Kind.Kind, resourceNamespace, resourceName, newImage)
+					log.Printf("Created patch for container image %s on %s %s:%s, with %s", sanitizeForLog(container.Image), sanitizeForLog(ar.Kind.Kind), sanitizeForLog(resourceNamespace), sanitizeForLog(resourceName), sanitizeForLog(newImage))
 					break // Stop checking other registries if a match is found
 				}
 			}
@@ -157,7 +171,7 @@ func actuallyMutate(body []byte) ([]byte, error) {
 							"value": newImage,
 						}
 						p = append(p, patch)
-						log.Printf("Created patch for container image %s on %s %s:%s, with %s", container.Image, ar.Kind.Kind, resourceNamespace, resourceName, newImage)
+						log.Printf("Created patch for container image %s on %s %s:%s, with %s", sanitizeForLog(container.Image), sanitizeForLog(ar.Kind.Kind), sanitizeForLog(resourceNamespace), sanitizeForLog(resourceName), sanitizeForLog(newImage))
 						break
 					}
 				}
@@ -176,7 +190,7 @@ func actuallyMutate(body []byte) ([]byte, error) {
 					}
 					p = append(p, patch)
 					imageReplaced = true
-					log.Printf("Created patch for initcontainer image %s on %s %s:%s, with %s", initcontainer.Image, ar.Kind.Kind, resourceNamespace, resourceName, newImage)
+					log.Printf("Created patch for initcontainer image %s on %s %s:%s, with %s", sanitizeForLog(initcontainer.Image), sanitizeForLog(ar.Kind.Kind), sanitizeForLog(resourceNamespace), sanitizeForLog(resourceName), sanitizeForLog(newImage))
 					break // Stop checking other registries if a match is found
 				}
 			}
@@ -192,7 +206,7 @@ func actuallyMutate(body []byte) ([]byte, error) {
 							"value": newImage,
 						}
 						p = append(p, patch)
-						log.Printf("Created patch for initcontainer image %s on %s %s:%s, with %s", initcontainer.Image, ar.Kind.Kind, resourceNamespace, resourceName, newImage)
+						log.Printf("Created patch for initcontainer image %s on %s %s:%s, with %s", sanitizeForLog(initcontainer.Image), sanitizeForLog(ar.Kind.Kind), sanitizeForLog(resourceNamespace), sanitizeForLog(resourceName), sanitizeForLog(newImage))
 						break
 					}
 				}
@@ -211,7 +225,7 @@ func actuallyMutate(body []byte) ([]byte, error) {
 					}
 					p = append(p, patch)
 					imageReplaced = true
-					log.Printf("Created patch for ephemeralcontainer image %s on %s %s:%s, with %s", ephemeralcontainer.Image, ar.Kind.Kind, resourceNamespace, resourceName, newImage)
+					log.Printf("Created patch for ephemeralcontainer image %s on %s %s:%s, with %s", sanitizeForLog(ephemeralcontainer.Image), sanitizeForLog(ar.Kind.Kind), sanitizeForLog(resourceNamespace), sanitizeForLog(resourceName), sanitizeForLog(newImage))
 					break // Stop checking other registries if a match is found
 				}
 			}
@@ -227,7 +241,7 @@ func actuallyMutate(body []byte) ([]byte, error) {
 							"value": newImage,
 						}
 						p = append(p, patch)
-						log.Printf("Created patch for ephemeralcontainer image %s on %s %s:%s, with %s", ephemeralcontainer.Image, ar.Kind.Kind, resourceNamespace, resourceName, newImage)
+						log.Printf("Created patch for ephemeralcontainer image %s on %s %s:%s, with %s", sanitizeForLog(ephemeralcontainer.Image), sanitizeForLog(ar.Kind.Kind), sanitizeForLog(resourceNamespace), sanitizeForLog(resourceName), sanitizeForLog(newImage))
 						break
 					}
 				}
@@ -250,7 +264,7 @@ func actuallyMutate(body []byte) ([]byte, error) {
 		if err != nil {
 			return nil, err // untested section
 		}
-		log.Printf("Successfully mutated %s %s:%s", strings.ToLower(ar.Kind.Kind), resourceNamespace, resourceName)
+		log.Printf("Successfully mutated %s %s:%s", sanitizeForLog(strings.ToLower(ar.Kind.Kind)), sanitizeForLog(resourceNamespace), sanitizeForLog(resourceName))
 	}
 
 	return responseBody, nil
