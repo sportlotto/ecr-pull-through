@@ -12,6 +12,8 @@ import (
 	"time"
 
 	v1beta1 "k8s.io/api/admission/v1beta1"
+	batchv1 "k8s.io/api/batch/v1"
+	batchv1beta1 "k8s.io/api/batch/v1beta1"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
@@ -65,7 +67,6 @@ func actuallyMutate(body []byte) ([]byte, error) {
 	}
 
 	var err error
-	var pod *corev1.Pod
 
 	responseBody := []byte{}
 	ar := admReview.Request
@@ -73,11 +74,6 @@ func actuallyMutate(body []byte) ([]byte, error) {
 
 	if ar != nil {
 
-		// get the Pod object and unmarshal it into its struct, if we cannot, we might as well stop here
-		if err := json.Unmarshal(ar.Object.Raw, &pod); err != nil {
-			return nil, fmt.Errorf("unable unmarshal pod json object %v", err)
-		}
-		log.Printf("Received request to mutate pod %s:%s", pod.Namespace, pod.ObjectMeta.GenerateName)
 		// set response options
 		resp.Allowed = true
 		resp.UID = ar.UID
@@ -87,20 +83,65 @@ func actuallyMutate(body []byte) ([]byte, error) {
 		// the actual mutation is done by a string in JSONPatch style, i.e. we don't _actually_ modify the object, but
 		// tell K8S how it should modifiy it
 		p := []map[string]string{}
+
+		// Determine resource type and extract pod template
+		var podSpec *corev1.PodSpec
+		var resourceName string
+		var resourceNamespace string
+		var pathPrefix string
+
+		switch ar.Kind.Kind {
+		case "Pod":
+			var pod corev1.Pod
+			if err := json.Unmarshal(ar.Object.Raw, &pod); err != nil {
+				return nil, fmt.Errorf("unable unmarshal pod json object %v", err)
+			}
+			podSpec = &pod.Spec
+			resourceName = pod.ObjectMeta.GenerateName
+			resourceNamespace = pod.Namespace
+			pathPrefix = "/spec"
+			log.Printf("Received request to mutate pod %s:%s", resourceNamespace, resourceName)
+
+		case "Job":
+			var job batchv1.Job
+			if err := json.Unmarshal(ar.Object.Raw, &job); err != nil {
+				return nil, fmt.Errorf("unable unmarshal job json object %v", err)
+			}
+			podSpec = &job.Spec.Template.Spec
+			resourceName = job.ObjectMeta.Name
+			resourceNamespace = job.Namespace
+			pathPrefix = "/spec/template/spec"
+			log.Printf("Received request to mutate job %s:%s", resourceNamespace, resourceName)
+
+		case "CronJob":
+			var cronJob batchv1.CronJob
+			if err := json.Unmarshal(ar.Object.Raw, &cronJob); err != nil {
+				return nil, fmt.Errorf("unable unmarshal cronjob json object %v", err)
+			}
+			podSpec = &cronJob.Spec.JobTemplate.Spec.Template.Spec
+			resourceName = cronJob.ObjectMeta.Name
+			resourceNamespace = cronJob.Namespace
+			pathPrefix = "/spec/jobTemplate/spec/template/spec"
+			log.Printf("Received request to mutate cronjob %s:%s", resourceNamespace, resourceName)
+
+		default:
+			return nil, fmt.Errorf("unsupported resource kind: %s", ar.Kind.Kind)
+		}
+
 		// Containers
-		for i, container := range pod.Spec.Containers {
+		for i, container := range podSpec.Containers {
 			imageReplaced := false
 			for _, reg := range config.RegistryList() {
 				if strings.HasPrefix(container.Image, reg) {
 					newImage := fmt.Sprintf("%s.dkr.ecr.%s.amazonaws.com/%s", config.AwsAccountID, config.AwsRegion, container.Image)
 					patch := map[string]string{
 						"op":    "replace",
-						"path":  fmt.Sprintf("/spec/containers/%d/image", i),
+						"path":  fmt.Sprintf("%s/containers/%d/image", pathPrefix, i),
 						"value": newImage,
 					}
 					p = append(p, patch)
 					imageReplaced = true
-					log.Printf("Created patch for container image %s on pod %s:%s, with %s", container.Image, pod.Namespace, pod.ObjectMeta.GenerateName, newImage)
+					log.Printf("Created patch for container image %s on %s %s:%s, with %s", container.Image, ar.Kind.Kind, resourceNamespace, resourceName, newImage)
 					break // Stop checking other registries if a match is found
 				}
 			}
@@ -112,30 +153,30 @@ func actuallyMutate(body []byte) ([]byte, error) {
 						newImage := fmt.Sprintf("%s.dkr.ecr.%s.amazonaws.com/docker.io/library/%s", config.AwsAccountID, config.AwsRegion, container.Image)
 						patch := map[string]string{
 							"op":    "replace",
-							"path":  fmt.Sprintf("/spec/containers/%d/image", i),
+							"path":  fmt.Sprintf("%s/containers/%d/image", pathPrefix, i),
 							"value": newImage,
 						}
 						p = append(p, patch)
-						log.Printf("Created patch for container image %s on pod %s:%s, with %s", container.Image, pod.Namespace, pod.ObjectMeta.GenerateName, newImage)
+						log.Printf("Created patch for container image %s on %s %s:%s, with %s", container.Image, ar.Kind.Kind, resourceNamespace, resourceName, newImage)
 						break
 					}
 				}
 			}
 		}
 		// InitContainers
-		for i, initcontainer := range pod.Spec.InitContainers {
+		for i, initcontainer := range podSpec.InitContainers {
 			imageReplaced := false
 			for _, reg := range config.RegistryList() {
 				if strings.HasPrefix(initcontainer.Image, reg) {
 					newImage := fmt.Sprintf("%s.dkr.ecr.%s.amazonaws.com/%s", config.AwsAccountID, config.AwsRegion, initcontainer.Image)
 					patch := map[string]string{
 						"op":    "replace",
-						"path":  fmt.Sprintf("/spec/initContainers/%d/image", i),
+						"path":  fmt.Sprintf("%s/initContainers/%d/image", pathPrefix, i),
 						"value": newImage,
 					}
 					p = append(p, patch)
 					imageReplaced = true
-					log.Printf("Created patch for initcontainer image %s on pod %s:%s, with %s", initcontainer.Image, pod.Namespace, pod.ObjectMeta.GenerateName, newImage)
+					log.Printf("Created patch for initcontainer image %s on %s %s:%s, with %s", initcontainer.Image, ar.Kind.Kind, resourceNamespace, resourceName, newImage)
 					break // Stop checking other registries if a match is found
 				}
 			}
@@ -147,30 +188,30 @@ func actuallyMutate(body []byte) ([]byte, error) {
 						newImage := fmt.Sprintf("%s.dkr.ecr.%s.amazonaws.com/docker.io/library/%s", config.AwsAccountID, config.AwsRegion, initcontainer.Image)
 						patch := map[string]string{
 							"op":    "replace",
-							"path":  fmt.Sprintf("/spec/initContainers/%d/image", i),
+							"path":  fmt.Sprintf("%s/initContainers/%d/image", pathPrefix, i),
 							"value": newImage,
 						}
 						p = append(p, patch)
-						log.Printf("Created patch for initcontainer image %s on pod %s:%s, with %s", initcontainer.Image, pod.Namespace, pod.ObjectMeta.GenerateName, newImage)
+						log.Printf("Created patch for initcontainer image %s on %s %s:%s, with %s", initcontainer.Image, ar.Kind.Kind, resourceNamespace, resourceName, newImage)
 						break
 					}
 				}
 			}
 		}
 		// EphemeralContainers
-		for i, ephemeralcontainer := range pod.Spec.EphemeralContainers {
+		for i, ephemeralcontainer := range podSpec.EphemeralContainers {
 			imageReplaced := false
 			for _, reg := range config.RegistryList() {
 				if strings.HasPrefix(ephemeralcontainer.Image, reg) {
 					newImage := fmt.Sprintf("%s.dkr.ecr.%s.amazonaws.com/%s", config.AwsAccountID, config.AwsRegion, ephemeralcontainer.Image)
 					patch := map[string]string{
 						"op":    "replace",
-						"path":  fmt.Sprintf("/spec/ephemeralContainers/%d/image", i),
+						"path":  fmt.Sprintf("%s/ephemeralContainers/%d/image", pathPrefix, i),
 						"value": newImage,
 					}
 					p = append(p, patch)
 					imageReplaced = true
-					log.Printf("Created patch for ephemeralcontainer image %s on pod %s:%s, with %s", ephemeralcontainer.Image, pod.Namespace, pod.ObjectMeta.GenerateName, newImage)
+					log.Printf("Created patch for ephemeralcontainer image %s on %s %s:%s, with %s", ephemeralcontainer.Image, ar.Kind.Kind, resourceNamespace, resourceName, newImage)
 					break // Stop checking other registries if a match is found
 				}
 			}
@@ -182,11 +223,11 @@ func actuallyMutate(body []byte) ([]byte, error) {
 						newImage := fmt.Sprintf("%s.dkr.ecr.%s.amazonaws.com/docker.io/library/%s", config.AwsAccountID, config.AwsRegion, ephemeralcontainer.Image)
 						patch := map[string]string{
 							"op":    "replace",
-							"path":  fmt.Sprintf("/spec/ephemeralContainers/%d/image", i),
+							"path":  fmt.Sprintf("%s/ephemeralContainers/%d/image", pathPrefix, i),
 							"value": newImage,
 						}
 						p = append(p, patch)
-						log.Printf("Created patch for ephemeralcontainer image %s on pod %s:%s, with %s", ephemeralcontainer.Image, pod.Namespace, pod.ObjectMeta.GenerateName, newImage)
+						log.Printf("Created patch for ephemeralcontainer image %s on %s %s:%s, with %s", ephemeralcontainer.Image, ar.Kind.Kind, resourceNamespace, resourceName, newImage)
 						break
 					}
 				}
@@ -209,7 +250,7 @@ func actuallyMutate(body []byte) ([]byte, error) {
 		if err != nil {
 			return nil, err // untested section
 		}
-		log.Printf("Successfully mutated pod %s:%s", pod.Namespace, pod.ObjectMeta.Name)
+		log.Printf("Successfully mutated %s %s:%s", strings.ToLower(ar.Kind.Kind), resourceNamespace, resourceName)
 	}
 
 	return responseBody, nil
